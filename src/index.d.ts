@@ -5,7 +5,7 @@ type CompilerOptions = {
   extension: string;
   manfiestFile: string;
   tmpPath: string;
-  framework: "svelte" | "vue";
+  framework: "svelte" | "vue" | "react";
 };
 
 declare class Compiler {

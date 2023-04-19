@@ -55,7 +55,7 @@ function transformerPlugin(options = {}, compilerOptions = {}) {
 
       const ast = parser.parse(code, {
         sourceType: "module",
-        plugins: ["typescript"],
+        plugins: ["typescript", "jsx", "tsx"],
       });
 
       traverse.default(ast, {
@@ -92,9 +92,118 @@ function transformerPlugin(options = {}, compilerOptions = {}) {
         },
       });
 
-      return generate.default(ast, {}, code);
+      let entryFile = resolveConfig([
+        compilerOptions.metaIdentifier,
+        "lib",
+        "entry",
+      ]);
+
+      let entryDir = resolveConfig([
+        compilerOptions.metaIdentifier,
+        "lib",
+        "dir",
+      ]);
+
+      entryFile = resolveResource(
+        compilerOptions.root,
+        `../src/${entryDir}/${entryFile}.ts`
+      );
+
+      if (compilerOptions.framework === "react" && id === entryFile) {
+        ast.program.body.unshift(
+          parser.parse(`window.process = { env: { NODE_ENV: "development" } };`)
+            .program.body[0]
+        );
+      }
+
+      const result = generate.default(ast, {}, code);
+      return result;
     },
   };
+}
+
+async function denoTransformer(compilerOptions = {}) {
+  const remoteDirectory = resolveResource(
+    compilerOptions.root,
+    `../src/${resolveConfig([
+      compilerOptions.metaIdentifier,
+      compilerOptions.remoteIdentifier,
+      "dir",
+    ])}`
+  );
+
+  const targetRemoteDirectory = resolveResource(
+    compilerOptions.root,
+    `./${compilerOptions.tmpPath}/${resolveConfig([
+      compilerOptions.metaIdentifier,
+      compilerOptions.remoteIdentifier,
+      "dir",
+    ])}`
+  );
+
+  let libDirectory = resolveResource(
+    compilerOptions.root,
+    `../src/${resolveConfig([
+      compilerOptions.metaIdentifier,
+      "lib",
+      "dir",
+    ])}`
+  );
+
+  const remoteFiles = await fs.promises.readdir(remoteDirectory);
+  fs.promises.mkdir(targetRemoteDirectory);
+
+  for (const file of remoteFiles) {
+    const id = resolve(remoteDirectory, file);
+    const content = await fs.promises.readFile(id, "utf-8");
+
+    const ast = parser.parse(content, {
+      sourceType: "module",
+      plugins: ["typescript"],
+    });
+
+    traverse.default(ast, {
+      ImportDeclaration(path) {
+        const importDirectory = parse(
+          resolve(parse(id).dir, path.node.source.value)
+        ).dir;
+
+        if (importDirectory === libDirectory) {
+          path.stop();
+          const importedKeys = [];
+
+          for (const specifier of path.node.specifiers) {
+            importedKeys.push({
+              imported: specifier.imported.name,
+              local: specifier.local.name,
+            });
+          }
+
+          const name = resolveConfig([
+            compilerOptions.metaIdentifier,
+            "identifier",
+          ]);
+
+          path.replaceWithMultiple(
+            importedKeys.map(
+              ({ imported, local }) =>
+                parser.parse(
+                  `const ${local} = globalThis["${name}"].remote.functions.${imported}`
+                ).program.body[0]
+            )
+          );
+        }
+      },
+    });
+
+    const result = generate.default(ast, {}, content);
+
+    fs.promises.writeFile(
+      resolve(targetRemoteDirectory, file),
+      result.code,
+      "utf-8"
+    );
+  }
 }
 
 export class Compiler {
@@ -121,11 +230,23 @@ export class Compiler {
         plugin = frameworkPlugin.default();
         break;
       }
+      case "react": {
+        const frameworkPlugin = await import("@vitejs/plugin-react");
+        plugin = frameworkPlugin.default();
+        break;
+      }
     }
 
     const transformer = transformerPlugin(
       {
-        include: ["**/*.ts", "**/*.js"],
+        include: [
+          "**/*.ts",
+          "**/*.js",
+          "**/*.tsx",
+          "**/*.jsx",
+          // "**/*.vue",
+          // "**/*.svelte",
+        ],
       },
       this.options
     );
@@ -158,7 +279,18 @@ export class Compiler {
             ])}.js`,
         },
         rollupOptions: {
-          external: [],
+          external: [
+            "react",
+            "react-dom",
+            "@kasif-apps/cinq",
+            "@mantine/core",
+            "@mantine/form",
+            "@mantine/hooks",
+            "@mantine/modals",
+            "@mantine/notifications",
+            "@mantine/spotlight",
+            "@tabler/icons",
+          ],
           output: {
             globals: {},
           },
@@ -170,6 +302,8 @@ export class Compiler {
         alias: {},
       },
     });
+
+    await denoTransformer(this.options);
   }
 
   async #package() {
@@ -185,26 +319,6 @@ export class Compiler {
         this.options.root,
         `./${this.options.tmpPath}/${this.options.manfiestFile}`
       )
-    );
-
-    fse.copySync(
-      resolveResource(
-        this.options.root,
-        `../src/${resolveConfig([
-          this.options.metaIdentifier,
-          this.options.remoteIdentifier,
-          "dir",
-        ])}`
-      ),
-      resolveResource(
-        this.options.root,
-        `./${this.options.tmpPath}/${resolveConfig([
-          this.options.metaIdentifier,
-          this.options.remoteIdentifier,
-          "dir",
-        ])}`
-      ),
-      { overwrite: true }
     );
 
     await zip(
